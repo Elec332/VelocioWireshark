@@ -34,37 +34,48 @@ local run_mode = {
 
 local tag_size = {
     [0x01] = "1-Bit",
-    [0x11] = "8-Bit"
+    [0x11] = "8-Bit",
+    [0x21] = "16-Bit",
+    [0x41] = "32-Bit"
 }
 
 
 velo_prot = Proto("velocio",  "Velocio Protocol")
 
 local vCapData = ProtoField.bytes("usb.capdata", "Captured Data")
+
 local vMalformed = ProtoField.none("velocio.malformed", "Malformed Packet")
 local vUnknown = ProtoField.none("velocio.unknown", "Rest Unknown")
 local vHeader = ProtoField.uint32("velocio.header", "Header", base.HEX)
 local vLength = ProtoField.uint8("velocio.length", "Length", base.DEC)
-local vCommand  = ProtoField.uint8("velocio.cmd", "Command ID", base.HEX, control_commands)
+local vCommand = ProtoField.uint8("velocio.cmd", "Command ID", base.HEX, control_commands)
 local vSend = ProtoField.none("velocio.send", "Send/Request")
 local vAck = ProtoField.none("velocio.ack", "ACK/Response")
-local vExecCmd  = ProtoField.uint8("velocio.cmd_exec", "Run State", base.HEX, run_states)
+local vExecCmd = ProtoField.uint8("velocio.cmd_exec", "Run State", base.HEX, run_states)
 local vTag2Bytes = ProtoField.uint16("velocio.t2b", "First Bytes", base.HEX)
 local vTagIndex = ProtoField.uint16("velocio.tag_index", "Tag Index", base.DEC)
 local vTagCount = ProtoField.uint16("velocio.tag_count", "Tag Count", base.DEC)
 local vBreakpointData = ProtoField.bytes("velocio.breakpoint_data", "Breakpoint Data")
 local vTimeData = ProtoField.relative_time("velocio.time", "Time")
 local vErrors = ProtoField.uint16("velocio.errors", "Error Data", base.HEX)
-local vRunType  = ProtoField.uint8("velocio.run_type", "Run Type", base.HEX, run_mode)
-local vFunctionPointer  = ProtoField.uint32("velocio.function_pointer", "Function Pointer", base.DEC)
+local vRunType = ProtoField.uint8("velocio.run_type", "Run Type", base.HEX, run_mode)
+local vFunctionPointer = ProtoField.uint32("velocio.function_pointer", "Function Pointer", base.DEC)
 local vUnknownByte = ProtoField.uint8("velocio.ubqm", "Unknown Byte", base.HEX)
+local vUnknown2Byte = ProtoField.uint16("velocio.ubqm2", "Unknown 2 Bytes", base.HEX)
 local vTagName = ProtoField.string("velocio.tag_name", "Tag Name")
-local vTagSize  = ProtoField.uint8("velocio.tag_size", "Tag Size", base.HEX, tag_size)
+local vTagSize = ProtoField.uint8("velocio.tag_size", "Tag Size", base.HEX, tag_size)
+local vTagIdentifier = ProtoField.uint64("velocio.tag_identifier", "Tag Identifier", base.HEX)
+local vTagRegister = ProtoField.uint16("velocio.tag_register", "Tag Register", base.HEX)
+local vTagBank = ProtoField.uint8("velocio.tag_bank", "Tag Bank", base.HEX)
+local vTagBit = ProtoField.uint8("velocio.bank_bit", "Bank Bit", base.HEX)
+local vTagBankInternal = ProtoField.none("velocio.bank_internal", "Internal Bank")
+local vTagValue = ProtoField.uint32("velocio.tag_value", "Tag Value", base.HEX)
 
 
 velo_prot.fields = {vCapData, vMalformed, vUnknown, vHeader, vLength, vCommand, vSend,
  vAck, vExecCmd, vTag2Bytes, vTagIndex, vTagCount, vBreakpointData, vTimeData, vErrors,
- vRunType, vFunctionPointer, vUnknownByte, vTagName, vTagSize}
+ vRunType, vFunctionPointer, vUnknownByte, vTagName, vTagSize, vUnknown2Byte, vTagIdentifier, 
+ vTagRegister, vTagBank, vTagBit, vTagBankInternal, vTagValue}
 
 function velo_prot.dissector(buffer, pinfo, tree)
    length = buffer:len()
@@ -105,11 +116,26 @@ function velo_prot.dissector(buffer, pinfo, tree)
    end
    
    --Get Tag Info
-   if vType:uint() == 0x0a and isAck then
+   if vType:uint() == 0x0a then
       subtree:add(vTagIndex, buffer(index, 2))
 	  index = index + 2
-	  subtree:add(vTagName, buffer(index, 16))
-	  index = index + 16
+      if isAck then
+	     subtree:add(vTagName, buffer(index, 16))
+	     index = index + 16
+	     st = subtree:add(vTagIdentifier, buffer(index, 8))
+	     st:add(vTagSize, buffer(index, 1))
+	     index = index + 8
+		 subtree:add(vUnknown2Byte, buffer(index, 2))
+		 index = index + 2
+		 st = subtree:add(vTagRegister, buffer(index, 2))
+		 if buffer(index, 2):uint() == 0x9fff then
+		    st:add(vTagBankInternal)
+		 else
+		    st:add(vTagBank, buffer(index, 1))
+		    st:add(vTagBit, buffer(index + 1, 1))
+		 end
+		 index = index + 2
+	  end
    end
    
    --Get Tag Info
@@ -119,6 +145,15 @@ function velo_prot.dissector(buffer, pinfo, tree)
 		 index = index + 1
 	     subtree:add(vTagIndex, buffer(index, 2))
 		 index = index + 2
+		 subtree:add(vUnknown2Byte, buffer(index, 2))
+		 index = index + 2
+		 subtree:add(vUnknownByte, buffer(index, 1))
+		 index = index + 1
+		 st = subtree:add(vTagIdentifier, buffer(index, 8))
+		 st:add(vTagSize, buffer(index, 1))
+		 index = index + 8
+		 subtree:add(vTagValue, buffer(index, length - index))
+		 index = length
       end
    end
    
@@ -142,8 +177,10 @@ function velo_prot.dissector(buffer, pinfo, tree)
    
    --Get Tag Count
    if vType:uint() == 0xac and isAck then
-      subtree:add(vTagCount, buffer(index + 1, 2))
-	  index = index + 3
+      subtree:add(vUnknownByte, buffer(index, 1))
+	  index = index + 1
+      subtree:add(vTagCount, buffer(index, 2))
+	  index = index + 2
    end
    
    --Run state
@@ -182,7 +219,7 @@ function velo_prot.dissector(buffer, pinfo, tree)
 	  index = index + 4
    end
    
-   if index + 1 < length then
+   if index < length then
       subtree:add(vUnknown, buffer(index))
    end
 
